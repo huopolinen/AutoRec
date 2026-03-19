@@ -53,11 +53,10 @@ class SystemAudioRecorder: NSObject {
         // --- Audio writer ---
         let aWriter = try AVAssetWriter(outputURL: audioURL, fileType: .m4a)
         let aSettings: [String: Any] = [
-            AVFormatIDKey: kAudioFormatMPEG4AAC,
-            AVSampleRateKey: 24000,
-            AVNumberOfChannelsKey: 1,
-            AVEncoderBitRateKey: 32000,
-            AVEncoderAudioQualityKey: AVAudioQuality.medium.rawValue,
+            AVFormatIDKey: kAudioFormatMPEG4AAC_HE,
+            AVSampleRateKey: 48000,
+            AVNumberOfChannelsKey: 2,
+            AVEncoderBitRateKey: 48000,
         ]
         let aInput = AVAssetWriterInput(mediaType: .audio, outputSettings: aSettings)
         aInput.expectsMediaDataInRealTime = true
@@ -82,8 +81,9 @@ class SystemAudioRecorder: NSObject {
         // --- Single SCStream for both audio and video ---
         let config = SCStreamConfiguration()
         config.capturesAudio = true
-        config.sampleRate = 24000
-        config.channelCount = 1
+        config.excludesCurrentProcessAudio = true
+        config.sampleRate = 48000
+        config.channelCount = 2
 
         if recordScreen {
             config.width = capW
@@ -235,8 +235,16 @@ extension SystemAudioRecorder: SCStreamOutput {
                 let pts = CMSampleBufferGetPresentationTimeStamp(sampleBuffer)
                 audioWriter?.startSession(atSourceTime: pts)
                 audioSessionStarted = true
+                // Log audio format for diagnostics
+                if let formatDesc = CMSampleBufferGetFormatDescription(sampleBuffer),
+                   let asbd = CMAudioFormatDescriptionGetStreamBasicDescription(formatDesc) {
+                    log("[SystemAudioRecorder] Audio format: \(asbd.pointee.mSampleRate)Hz, \(asbd.pointee.mChannelsPerFrame)ch, \(asbd.pointee.mBitsPerChannel)bit")
+                }
             }
             input.append(sampleBuffer)
+
+        case .microphone:
+            break // mic is handled by MicRecorder
 
         case .screen:
             guard !videoFailed else { return }

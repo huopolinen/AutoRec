@@ -12,8 +12,10 @@ swift build -c release
 echo "Creating app bundle..."
 rm -rf "$APP_BUNDLE"
 mkdir -p "$APP_DIR"
+mkdir -p "$APP_BUNDLE/Contents/Resources"
 cp "$BUILD_DIR/$APP_NAME" "$APP_DIR/"
 cp Info.plist "$APP_BUNDLE/Contents/"
+cp AutoRec.icns "$APP_BUNDLE/Contents/Resources/"
 
 # Create entitlements
 cat > /tmp/autorec-entitlements.plist << 'ENTITLEMENTS'

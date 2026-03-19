@@ -56,8 +56,9 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
 
         if let button = statusItem.button {
-            button.image = NSImage(systemSymbolName: "phone.badge.checkmark",
-                                   accessibilityDescription: "Call Recorder")
+            button.image = NSImage(systemSymbolName: "circle.fill",
+                                   accessibilityDescription: "AutoRec")
+            button.contentTintColor = .systemGray
         }
 
         updateMenu()
@@ -152,28 +153,18 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func updateStatusIcon(_ state: RecordingState) {
-        let symbolName: String
-        switch state {
-        case .idle:
-            symbolName = "phone.badge.checkmark"
-        case .recording:
-            symbolName = "record.circle.fill"
-        case .paused:
-            symbolName = "pause.circle.fill"
-        case .starting, .stopping:
-            symbolName = "hourglass"
-        }
-
         if let button = statusItem.button {
-            button.image = NSImage(systemSymbolName: symbolName,
-                                   accessibilityDescription: "Call Recorder")
+            button.image = NSImage(systemSymbolName: "circle.fill",
+                                   accessibilityDescription: "AutoRec")
             switch state {
             case .recording:
                 button.contentTintColor = .systemRed
             case .paused:
                 button.contentTintColor = .systemOrange
-            default:
-                button.contentTintColor = nil
+            case .starting, .stopping:
+                button.contentTintColor = .systemYellow
+            case .idle:
+                button.contentTintColor = .systemGray
             }
         }
         updateMenu()

@@ -28,15 +28,14 @@ class MicRecorder {
             throw MicRecorderError.noMicAvailable
         }
 
-        // Compressed mono voice-quality audio
+        // HE-AAC v2 — optimized for mono speech, clear at low bitrates
         let audioFile = try AVAudioFile(
             forWriting: outputURL,
             settings: [
-                AVFormatIDKey: kAudioFormatMPEG4AAC,
-                AVSampleRateKey: 24000,
+                AVFormatIDKey: kAudioFormatMPEG4AAC_HE_V2,
+                AVSampleRateKey: 48000,
                 AVNumberOfChannelsKey: 1,
                 AVEncoderBitRateKey: 32000,
-                AVEncoderAudioQualityKey: AVAudioQuality.medium.rawValue,
             ]
         )
 
