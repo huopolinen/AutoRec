@@ -1,0 +1,124 @@
+import Foundation
+
+/// Orchestrates system audio, mic, and screen recording.
+class RecordingManager {
+    private(set) var state: RecordingState = .idle
+    var onStateChange: ((RecordingState) -> Void)?
+    var onRecordingActiveChanged: ((Bool) -> Void)?
+    /// Fired when transcription completes after a recording
+    var onTranscriptionDone: (() -> Void)?
+
+    private var systemAudioRecorder: SystemAudioRecorder?
+    private var micRecorder: MicRecorder?
+    private let settings = SettingsManager.shared
+
+    // Track current session file URLs for transcription
+    private var currentMicURL: URL?
+    private var currentSystemURL: URL?
+
+    private(set) var isTranscribing = false
+
+    func startRecording() {
+        guard state == .idle else {
+            print("[RecordingManager] Cannot start — state is \(state)")
+            return
+        }
+        setState(.starting)
+        onRecordingActiveChanged?(true)
+
+        settings.ensureOutputDirectory()
+
+        let timestamp = Self.timestamp()
+        let baseDir = URL(fileURLWithPath: settings.outputPath)
+
+        let sysURL = baseDir.appendingPathComponent("call_\(timestamp)_system.m4a")
+        let micURL = baseDir.appendingPathComponent("call_\(timestamp)_mic.m4a")
+        let vidURL: URL? = settings.recordScreen
+            ? baseDir.appendingPathComponent("call_\(timestamp)_screen.mp4")
+            : nil
+
+        self.currentMicURL = micURL
+        self.currentSystemURL = sysURL
+
+        Task {
+            do {
+                let sysRec = SystemAudioRecorder(audioURL: sysURL, videoURL: vidURL)
+                self.systemAudioRecorder = sysRec
+                try await sysRec.start()
+
+                let micRec = MicRecorder(outputURL: micURL)
+                self.micRecorder = micRec
+                try micRec.start()
+
+                setState(.recording)
+                print("[RecordingManager] All recorders running")
+            } catch {
+                print("[RecordingManager] ❌ Failed to start: \(error)")
+                await systemAudioRecorder?.stop()
+                micRecorder?.stop()
+                systemAudioRecorder = nil
+                micRecorder = nil
+                setState(.idle)
+                onRecordingActiveChanged?(false)
+            }
+        }
+    }
+
+    func pauseRecording() {
+        guard state == .recording else { return }
+        systemAudioRecorder?.isPaused = true
+        micRecorder?.isPaused = true
+        setState(.paused)
+        print("[RecordingManager] Paused")
+    }
+
+    func resumeRecording() {
+        guard state == .paused else { return }
+        systemAudioRecorder?.isPaused = false
+        micRecorder?.isPaused = false
+        setState(.recording)
+        print("[RecordingManager] Resumed")
+    }
+
+    func stopRecording() {
+        guard state == .recording || state == .starting || state == .paused else { return }
+        setState(.stopping)
+
+        let micURL = currentMicURL
+        let sysURL = currentSystemURL
+
+        Task {
+            micRecorder?.stop()
+            await systemAudioRecorder?.stop()
+            micRecorder = nil
+            systemAudioRecorder = nil
+            setState(.idle)
+            onRecordingActiveChanged?(false)
+            print("[RecordingManager] All recorders stopped")
+
+            // Auto-transcribe if enabled and whisper is available
+            if settings.autoTranscribe && Transcriber.shared.isAvailable {
+                isTranscribing = true
+                onStateChange?(state) // trigger UI update
+                print("[RecordingManager] Starting transcription...")
+                Transcriber.shared.transcribeSession(micURL: micURL, systemURL: sysURL) { [weak self] in
+                    self?.isTranscribing = false
+                    self?.onTranscriptionDone?()
+                    self?.onStateChange?(self?.state ?? .idle)
+                    print("[RecordingManager] Transcription complete")
+                }
+            }
+        }
+    }
+
+    private func setState(_ newState: RecordingState) {
+        state = newState
+        onStateChange?(newState)
+    }
+
+    private static func timestamp() -> String {
+        let fmt = DateFormatter()
+        fmt.dateFormat = "yyyy-MM-dd_HH-mm-ss"
+        return fmt.string(from: Date())
+    }
+}

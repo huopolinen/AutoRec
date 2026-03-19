@@ -1,0 +1,300 @@
+import Foundation
+import ScreenCaptureKit
+import AVFoundation
+import CoreVideo
+
+/// Captures system audio and optionally screen via a single SCStream.
+/// System audio → .m4a file, screen → .mp4 file (if enabled).
+class SystemAudioRecorder: NSObject {
+    private var stream: SCStream?
+
+    // Audio writer
+    private var audioWriter: AVAssetWriter?
+    private var audioInput: AVAssetWriterInput?
+    private var audioSessionStarted = false
+    private let audioURL: URL
+
+    // Video writer (optional)
+    private var videoWriter: AVAssetWriter?
+    private var videoInput: AVAssetWriterInput?
+    private var videoSessionStarted = false
+    private var videoFailed = false
+    private let videoURL: URL?
+
+    // Capture dimensions (set during start, used for video writer)
+    private var captureWidth: Int = 0
+    private var captureHeight: Int = 0
+
+    // Keep strong references to queues — SCStream may not retain them
+    private var audioQueue: DispatchQueue?
+    private var videoQueue: DispatchQueue?
+
+    private var isRecording = false
+    var isPaused = false
+
+    /// If videoURL is nil, only audio is captured (no screen).
+    init(audioURL: URL, videoURL: URL?) {
+        self.audioURL = audioURL
+        self.videoURL = videoURL
+        super.init()
+    }
+
+    func start() async throws {
+        guard !isRecording else { return }
+
+        try? FileManager.default.removeItem(at: audioURL)
+        if let videoURL { try? FileManager.default.removeItem(at: videoURL) }
+
+        let content = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: false)
+        guard let display = content.displays.first else {
+            throw RecordingError.noDisplay
+        }
+
+        // --- Audio writer ---
+        let aWriter = try AVAssetWriter(outputURL: audioURL, fileType: .m4a)
+        let aSettings: [String: Any] = [
+            AVFormatIDKey: kAudioFormatMPEG4AAC,
+            AVSampleRateKey: 24000,
+            AVNumberOfChannelsKey: 1,
+            AVEncoderBitRateKey: 32000,
+            AVEncoderAudioQualityKey: AVAudioQuality.medium.rawValue,
+        ]
+        let aInput = AVAssetWriterInput(mediaType: .audio, outputSettings: aSettings)
+        aInput.expectsMediaDataInRealTime = true
+        aWriter.add(aInput)
+        guard aWriter.startWriting() else {
+            throw RecordingError.writerFailed(aWriter.error?.localizedDescription ?? "unknown")
+        }
+        self.audioWriter = aWriter
+        self.audioInput = aInput
+        self.audioSessionStarted = false
+
+        // --- Determine capture size ---
+        // Use display size in pixels (Retina-aware): width * scaleFactor
+        let recordScreen = videoURL != nil
+        let scale = Int(NSScreen.main?.backingScaleFactor ?? 2.0)
+        // Make sure dimensions are even for H.264
+        let capW = (display.width * scale) & ~1
+        let capH = (display.height * scale) & ~1
+        self.captureWidth = capW
+        self.captureHeight = capH
+
+        // --- Single SCStream for both audio and video ---
+        let config = SCStreamConfiguration()
+        config.capturesAudio = true
+        config.sampleRate = 24000
+        config.channelCount = 1
+
+        if recordScreen {
+            config.width = capW
+            config.height = capH
+            config.minimumFrameInterval = CMTime(value: 1, timescale: 10) // 10fps is enough for calls
+            config.showsCursor = true
+            config.pixelFormat = kCVPixelFormatType_32BGRA
+        } else {
+            config.width = 2
+            config.height = 2
+            config.minimumFrameInterval = CMTime(value: 1, timescale: 1)
+        }
+
+        log("[SystemAudioRecorder] Display: \(display.width)x\(display.height) pts, capture: \(capW)x\(capH) px, scale: \(scale)")
+
+        // Video writer is created lazily on first frame to ensure dimensions match
+        self.videoFailed = false
+
+        let filter = SCContentFilter(display: display, excludingWindows: [])
+        let stream = SCStream(filter: filter, configuration: config, delegate: self)
+
+        let aQueue = DispatchQueue(label: "autorec.audio", qos: .userInitiated)
+        self.audioQueue = aQueue
+        try stream.addStreamOutput(self, type: .audio, sampleHandlerQueue: aQueue)
+
+        if recordScreen {
+            let vQueue = DispatchQueue(label: "autorec.video", qos: .userInitiated)
+            self.videoQueue = vQueue
+            try stream.addStreamOutput(self, type: .screen, sampleHandlerQueue: vQueue)
+        }
+
+        self.stream = stream
+        try await stream.startCapture()
+        isRecording = true
+
+        log("[SystemAudioRecorder] Started — audio: \(audioURL.lastPathComponent), video: \(videoURL?.lastPathComponent ?? "off")")
+    }
+
+    /// Create video writer lazily on the first real frame, so we know the exact pixel dimensions.
+    private func setupVideoWriter(from sampleBuffer: CMSampleBuffer) -> Bool {
+        guard let videoURL = videoURL else { return false }
+
+        // Get actual frame dimensions from the pixel buffer
+        guard let pixelBuffer = CMSampleBufferGetImageBuffer(sampleBuffer) else {
+            log("[SystemAudioRecorder] ❌ No pixel buffer in screen frame")
+            return false
+        }
+        let frameW = CVPixelBufferGetWidth(pixelBuffer)
+        let frameH = CVPixelBufferGetHeight(pixelBuffer)
+
+        log("[SystemAudioRecorder] First frame: \(frameW)x\(frameH) px")
+
+        do {
+            let vWriter = try AVAssetWriter(outputURL: videoURL, fileType: .mp4)
+            // Write movie fragments every 10s so the file is playable even if not finalized
+            vWriter.movieFragmentInterval = CMTime(seconds: 10, preferredTimescale: 600)
+
+            let vSettings: [String: Any] = [
+                AVVideoCodecKey: AVVideoCodecType.h264,
+                AVVideoWidthKey: frameW,
+                AVVideoHeightKey: frameH,
+                AVVideoCompressionPropertiesKey: [
+                    AVVideoAverageBitRateKey: 1_500_000,
+                    AVVideoProfileLevelKey: AVVideoProfileLevelH264HighAutoLevel,
+                ] as [String: Any],
+            ]
+            let vInput = AVAssetWriterInput(mediaType: .video, outputSettings: vSettings)
+            vInput.expectsMediaDataInRealTime = true
+            vInput.transform = .identity
+            vWriter.add(vInput)
+
+            guard vWriter.startWriting() else {
+                log("[SystemAudioRecorder] ❌ Video writer failed to start: \(vWriter.error?.localizedDescription ?? "unknown")")
+                return false
+            }
+
+            self.videoWriter = vWriter
+            self.videoInput = vInput
+            self.videoSessionStarted = false
+            return true
+        } catch {
+            log("[SystemAudioRecorder] ❌ Failed to create video writer: \(error)")
+            return false
+        }
+    }
+
+    func stop() async {
+        guard isRecording else { return }
+        isRecording = false
+
+        do {
+            try await stream?.stopCapture()
+        } catch {
+            log("[SystemAudioRecorder] stopCapture error: \(error)")
+        }
+        stream = nil
+
+        // Small delay to let in-flight buffers drain
+        try? await Task.sleep(nanoseconds: 300_000_000)
+
+        // Finalize audio
+        if let aInput = audioInput, let aWriter = audioWriter {
+            if aWriter.status == .writing {
+                aInput.markAsFinished()
+                await withCheckedContinuation { (cont: CheckedContinuation<Void, Never>) in
+                    aWriter.finishWriting {
+                        log("[SystemAudioRecorder] Audio done — status: \(aWriter.status.rawValue)")
+                        cont.resume()
+                    }
+                }
+            } else {
+                log("[SystemAudioRecorder] Audio writer not in writing state: \(aWriter.status.rawValue), error: \(aWriter.error?.localizedDescription ?? "none")")
+            }
+        }
+        audioWriter = nil
+        audioInput = nil
+
+        // Finalize video
+        if let vInput = videoInput, let vWriter = videoWriter {
+            if vWriter.status == .writing {
+                vInput.markAsFinished()
+                await withCheckedContinuation { (cont: CheckedContinuation<Void, Never>) in
+                    vWriter.finishWriting {
+                        log("[SystemAudioRecorder] Video done — status: \(vWriter.status.rawValue)")
+                        cont.resume()
+                    }
+                }
+            } else {
+                log("[SystemAudioRecorder] ❌ Video writer not in writing state: \(vWriter.status.rawValue), error: \(vWriter.error?.localizedDescription ?? "none")")
+            }
+        }
+        videoWriter = nil
+        videoInput = nil
+        audioQueue = nil
+        videoQueue = nil
+
+        log("[SystemAudioRecorder] Stopped")
+    }
+}
+
+extension SystemAudioRecorder: SCStreamOutput {
+    func stream(_ stream: SCStream, didOutputSampleBuffer sampleBuffer: CMSampleBuffer, of type: SCStreamOutputType) {
+        guard isRecording, !isPaused, CMSampleBufferDataIsReady(sampleBuffer) else { return }
+
+        switch type {
+        case .audio:
+            guard let input = audioInput, input.isReadyForMoreMediaData else { return }
+            if !audioSessionStarted {
+                let pts = CMSampleBufferGetPresentationTimeStamp(sampleBuffer)
+                audioWriter?.startSession(atSourceTime: pts)
+                audioSessionStarted = true
+            }
+            input.append(sampleBuffer)
+
+        case .screen:
+            guard !videoFailed else { return }
+
+            // Check frame status
+            let attachments = CMSampleBufferGetSampleAttachmentsArray(sampleBuffer, createIfNecessary: false) as? [[SCStreamFrameInfo: Any]]
+            let statusValue = attachments?.first?[.status] as? Int
+            let status = statusValue.flatMap { SCFrameStatus(rawValue: $0) }
+
+            if !videoSessionStarted {
+                log("[SystemAudioRecorder] Screen frame received — status: \(statusValue ?? -1), hasImageBuffer: \(CMSampleBufferGetImageBuffer(sampleBuffer) != nil)")
+            }
+
+            guard status == .complete else { return }
+
+            // Lazy init video writer on first real frame
+            if videoWriter == nil {
+                if !setupVideoWriter(from: sampleBuffer) {
+                    videoFailed = true
+                    return
+                }
+            }
+
+            guard let input = videoInput, input.isReadyForMoreMediaData else { return }
+
+            if !videoSessionStarted {
+                let pts = CMSampleBufferGetPresentationTimeStamp(sampleBuffer)
+                videoWriter?.startSession(atSourceTime: pts)
+                videoSessionStarted = true
+                log("[SystemAudioRecorder] Video session started")
+            }
+
+            if !input.append(sampleBuffer) {
+                log("[SystemAudioRecorder] ❌ Video append failed — writer status: \(videoWriter?.status.rawValue ?? -1), error: \(videoWriter?.error?.localizedDescription ?? "unknown")")
+                videoFailed = true
+            }
+
+        @unknown default:
+            break
+        }
+    }
+}
+
+extension SystemAudioRecorder: SCStreamDelegate {
+    func stream(_ stream: SCStream, didStopWithError error: Error) {
+        log("[SystemAudioRecorder] Stream stopped with error: \(error)")
+        isRecording = false
+    }
+}
+
+enum RecordingError: Error, LocalizedError {
+    case noDisplay
+    case writerFailed(String)
+
+    var errorDescription: String? {
+        switch self {
+        case .noDisplay: return "No display found for screen capture"
+        case .writerFailed(let msg): return "Asset writer failed: \(msg)"
+        }
+    }
+}
