@@ -1,21 +1,17 @@
 # AutoRec
 
-A lightweight macOS menu bar app that automatically records your calls — system audio, microphone, and optionally screen — with local transcription support. Everything stays on your machine.
+Your calls are data. Don't lose them.
+
+Every meeting, every negotiation, every support call — it's raw material for training models, building knowledge bases, and extracting insights. The problem is that this data evaporates the moment you hang up. AutoRec fixes that: it sits in your menu bar, detects calls automatically, and silently records everything — system audio, your microphone, and optionally your screen. After the call ends, it transcribes locally via whisper.cpp. No cloud, no subscriptions, no data leaving your machine. Just structured, searchable recordings accumulating on your disk, ready for whatever you build next.
 
 ## Features
 
-- **Auto-detection** — monitors microphone usage and starts recording when a call begins (Zoom, Teams, FaceTime, etc.)
-- **System audio capture** — records what you hear via ScreenCaptureKit (HE-AAC, 48kHz stereo)
-- **Microphone capture** — records your voice into a separate track (HE-AAC v2, 48kHz mono)
-- **Screen recording** — optional screen capture at 10 fps, H.264 (toggleable)
-- **Auto-transcription** — runs [whisper.cpp](https://github.com/ggerganov/whisper.cpp) locally after each call (no data leaves your machine)
-- **Menu bar indicator** — gray circle when idle, red when recording, orange when paused
-
-## Requirements
-
-- macOS 13+
-- Xcode Command Line Tools (for building)
-- [whisper-cli](https://github.com/ggerganov/whisper.cpp) + [ffmpeg](https://ffmpeg.org/) (optional, for transcription)
+- **Auto-detection** — monitors mic usage, starts recording the moment a call begins (Zoom, Teams, FaceTime, etc.)
+- **Dual-track audio** — system audio (what you hear) and microphone (what you say) as separate files
+- **Screen recording** — optional 10 fps H.264 capture, toggled from the menu
+- **Local transcription** — whisper.cpp runs on your machine after each call, no API keys needed
+- **Efficient codecs** — HE-AAC keeps files small (~5 MB/hour per track) while staying clear enough for speech recognition
+- **Zero friction** — menu bar dot: gray = idle, red = recording. That's it.
 
 ## Build & Install
 
@@ -26,51 +22,51 @@ bash build-app.sh
 cp -r AutoRec.app /Applications/
 ```
 
-On first launch macOS will ask for **Microphone** and **Screen Recording** permissions.
+macOS 13+ required. On first launch, grant **Microphone** and **Screen Recording** permissions.
 
 ## Usage
 
-Click the menu bar icon to:
+Click the menu bar icon:
 
-- **Start/Stop Recording** manually
-- **Pause/Resume** an active recording
-- **Auto-detect Calls** — toggle automatic recording when a call is detected
+- **Start/Stop Recording** — manual control
+- **Pause/Resume** — mid-call pause
+- **Auto-detect Calls** — fire-and-forget mode
 - **Record Screen** — toggle screen capture
-- **Auto-transcribe** — toggle post-call transcription via whisper.cpp
-- **Output folder** — choose where recordings are saved
+- **Auto-transcribe** — toggle post-call whisper.cpp transcription
+- **Output folder** — choose where recordings land
 
-Recordings are saved to `~/Downloads/AutoRec/` by default. Each session produces:
+Default output: `~/Downloads/AutoRec/`
 
 | File | Contents |
 |------|----------|
-| `call_<timestamp>_system.m4a` | System audio (what you hear) |
+| `call_<timestamp>_system.m4a` | System audio (their voice) |
 | `call_<timestamp>_mic.m4a` | Microphone (your voice) |
 | `call_<timestamp>_screen.mp4` | Screen recording (if enabled) |
-| `call_<timestamp>_*.txt` | Transcription (if enabled) |
+| `call_<timestamp>_transcript.txt` | Transcription (if enabled) |
 
 ## Audio Quality
 
-AutoRec uses efficient HE-AAC codecs to keep files small while maintaining clear speech for transcription:
+| Track | Codec | Sample Rate | Bitrate |
+|-------|-------|-------------|---------|
+| System audio | HE-AAC v1 | 48 kHz stereo | 48 kbps |
+| Microphone | HE-AAC v2 | 48 kHz mono | 32 kbps |
 
-| Track | Codec | Sample Rate | Bitrate | Notes |
-|-------|-------|-------------|---------|-------|
-| System audio | HE-AAC v1 | 48 kHz | 48 kbps stereo | SBR for high-frequency reconstruction |
-| Microphone | HE-AAC v2 | 48 kHz | 32 kbps mono | Parametric Stereo + SBR, optimal for speech |
+HE-AAC uses spectral band replication — full encoding of speech frequencies, compact reconstruction of highs. The result: clear voice at a fraction of the file size compared to AAC-LC.
 
-## Transcription Setup
-
-Install whisper.cpp and ffmpeg:
+## Transcription
 
 ```bash
 brew install ffmpeg whisper-cpp
 ```
 
-AutoRec will auto-detect `whisper-cli` in your PATH. A whisper model is required — download one:
+Download a model (base multilingual covers most languages, ~150 MB):
 
 ```bash
-# Base multilingual model (recommended, ~150MB, supports Russian and other languages)
-curl -L "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base.bin" -o /usr/local/share/whisper-cpp/ggml-base.bin
+curl -L "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base.bin" \
+  -o /usr/local/share/whisper-cpp/ggml-base.bin
 ```
+
+AutoRec auto-detects `whisper-cli` in PATH. Transcription runs locally after each recording — no API calls, no latency, no cost.
 
 ## License
 

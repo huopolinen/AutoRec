@@ -56,9 +56,14 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
 
         if let button = statusItem.button {
-            button.image = NSImage(systemSymbolName: "circle.fill",
-                                   accessibilityDescription: "AutoRec")
-            button.contentTintColor = .systemGray
+            let size = NSSize(width: 14, height: 14)
+            let image = NSImage(size: size, flipped: false) { rect in
+                NSColor.systemGray.setFill()
+                NSBezierPath(ovalIn: rect).fill()
+                return true
+            }
+            image.isTemplate = false
+            button.image = image
         }
 
         updateMenu()
@@ -154,18 +159,25 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func updateStatusIcon(_ state: RecordingState) {
         if let button = statusItem.button {
-            button.image = NSImage(systemSymbolName: "circle.fill",
-                                   accessibilityDescription: "AutoRec")
+            let color: NSColor
             switch state {
             case .recording:
-                button.contentTintColor = .systemRed
+                color = NSColor(red: 1.0, green: 0.1, blue: 0.1, alpha: 1.0)
             case .paused:
-                button.contentTintColor = .systemOrange
+                color = .systemOrange
             case .starting, .stopping:
-                button.contentTintColor = .systemYellow
+                color = .systemYellow
             case .idle:
-                button.contentTintColor = .systemGray
+                color = .systemGray
             }
+            let size = NSSize(width: 14, height: 14)
+            let image = NSImage(size: size, flipped: false) { rect in
+                color.setFill()
+                NSBezierPath(ovalIn: rect).fill()
+                return true
+            }
+            image.isTemplate = false
+            button.image = image
         }
         updateMenu()
     }
