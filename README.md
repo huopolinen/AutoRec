@@ -1,3 +1,5 @@
+<img width="1408" height="768" alt="image" src="https://github.com/user-attachments/assets/95171c46-2717-4b21-91ad-2ae2d5622964" />
+
 # AutoRec
 
 Your calls are data. Don't lose them.
