@@ -20,15 +20,22 @@ class AppDelegate: NSObject, NSApplicationDelegate {
                 self?.updateStatusIcon(state)
             }
         }
-        // Pause call detector while recording (our own mic usage would confuse it)
+        // Switch call detector between normal and recording mode
         recordingManager.onRecordingActiveChanged = { [weak self] active in
+            guard let self = self else { return }
             if active {
-                self?.callDetector.pause()
+                if self.settings.autoDetect {
+                    self.callDetector.enterRecordingMode()
+                }
             } else {
-                if self?.settings.autoDetect == true {
-                    self?.callDetector.resume()
+                if self.settings.autoDetect {
+                    self.callDetector.exitRecordingMode()
                 }
             }
+        }
+        // Forward silence state from system audio to call detector
+        recordingManager.onSilenceChanged = { [weak self] silent in
+            self?.callDetector.reportSystemAudioSilence(silent)
         }
 
         callDetector = CallDetector()

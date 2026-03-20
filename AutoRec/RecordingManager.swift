@@ -5,6 +5,8 @@ class RecordingManager {
     private(set) var state: RecordingState = .idle
     var onStateChange: ((RecordingState) -> Void)?
     var onRecordingActiveChanged: ((Bool) -> Void)?
+    /// Fired when system audio silence state changes during recording.
+    var onSilenceChanged: ((Bool) -> Void)?
     /// Fired when transcription completes after a recording
     var onTranscriptionDone: (() -> Void)?
 
@@ -20,7 +22,7 @@ class RecordingManager {
 
     func startRecording() {
         guard state == .idle else {
-            print("[RecordingManager] Cannot start — state is \(state)")
+            log("[RecordingManager] Cannot start — state is \(state)")
             return
         }
         setState(.starting)
@@ -43,6 +45,10 @@ class RecordingManager {
         Task {
             do {
                 let sysRec = SystemAudioRecorder(audioURL: sysURL, videoURL: vidURL)
+                // Wire up silence detection
+                sysRec.onSilenceChanged = { [weak self] silent in
+                    self?.onSilenceChanged?(silent)
+                }
                 self.systemAudioRecorder = sysRec
                 try await sysRec.start()
 
@@ -51,9 +57,9 @@ class RecordingManager {
                 try micRec.start()
 
                 setState(.recording)
-                print("[RecordingManager] All recorders running")
+                log("[RecordingManager] All recorders running")
             } catch {
-                print("[RecordingManager] ❌ Failed to start: \(error)")
+                log("[RecordingManager] ❌ Failed to start: \(error)")
                 await systemAudioRecorder?.stop()
                 micRecorder?.stop()
                 systemAudioRecorder = nil

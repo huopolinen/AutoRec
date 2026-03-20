@@ -32,6 +32,15 @@ class SystemAudioRecorder: NSObject {
     private var isRecording = false
     var isPaused = false
 
+    // --- Silence detection ---
+    /// Fires when system audio transitions to/from silence.
+    /// `true` = silent for silenceDurationThreshold, `false` = audio resumed.
+    var onSilenceChanged: ((Bool) -> Void)?
+    private let silenceRMSThreshold: Float = 0.001
+    private let silenceDurationThreshold: TimeInterval = 20.0
+    private var silenceStart: Date?
+    private var isSilent = false
+
     /// If videoURL is nil, only audio is captured (no screen).
     init(audioURL: URL, videoURL: URL?) {
         self.audioURL = audioURL
@@ -69,12 +78,12 @@ class SystemAudioRecorder: NSObject {
         self.audioSessionStarted = false
 
         // --- Determine capture size ---
-        // Use display size in pixels (Retina-aware): width * scaleFactor
+        // Use 1x display size (not Retina) — sufficient for call recordings
+        // and much more reliable for H.264 encoding
         let recordScreen = videoURL != nil
-        let scale = Int(NSScreen.main?.backingScaleFactor ?? 2.0)
         // Make sure dimensions are even for H.264
-        let capW = (display.width * scale) & ~1
-        let capH = (display.height * scale) & ~1
+        let capW = display.width & ~1
+        let capH = display.height & ~1
         self.captureWidth = capW
         self.captureHeight = capH
 
@@ -97,7 +106,7 @@ class SystemAudioRecorder: NSObject {
             config.minimumFrameInterval = CMTime(value: 1, timescale: 1)
         }
 
-        log("[SystemAudioRecorder] Display: \(display.width)x\(display.height) pts, capture: \(capW)x\(capH) px, scale: \(scale)")
+        log("[SystemAudioRecorder] Display: \(display.width)x\(display.height) pts, capture: \(capW)x\(capH) px")
 
         // Video writer is created lazily on first frame to ensure dimensions match
         self.videoFailed = false
@@ -138,16 +147,15 @@ class SystemAudioRecorder: NSObject {
 
         do {
             let vWriter = try AVAssetWriter(outputURL: videoURL, fileType: .mp4)
-            // Write movie fragments every 10s so the file is playable even if not finalized
-            vWriter.movieFragmentInterval = CMTime(seconds: 10, preferredTimescale: 600)
 
             let vSettings: [String: Any] = [
                 AVVideoCodecKey: AVVideoCodecType.h264,
                 AVVideoWidthKey: frameW,
                 AVVideoHeightKey: frameH,
                 AVVideoCompressionPropertiesKey: [
-                    AVVideoAverageBitRateKey: 1_500_000,
-                    AVVideoProfileLevelKey: AVVideoProfileLevelH264HighAutoLevel,
+                    AVVideoAverageBitRateKey: 2_000_000,
+                    AVVideoProfileLevelKey: AVVideoProfileLevelH264MainAutoLevel,
+                    AVVideoMaxKeyFrameIntervalKey: 30,
                 ] as [String: Any],
             ]
             let vInput = AVAssetWriterInput(mediaType: .video, outputSettings: vSettings)
@@ -235,13 +243,13 @@ extension SystemAudioRecorder: SCStreamOutput {
                 let pts = CMSampleBufferGetPresentationTimeStamp(sampleBuffer)
                 audioWriter?.startSession(atSourceTime: pts)
                 audioSessionStarted = true
-                // Log audio format for diagnostics
                 if let formatDesc = CMSampleBufferGetFormatDescription(sampleBuffer),
                    let asbd = CMAudioFormatDescriptionGetStreamBasicDescription(formatDesc) {
                     log("[SystemAudioRecorder] Audio format: \(asbd.pointee.mSampleRate)Hz, \(asbd.pointee.mChannelsPerFrame)ch, \(asbd.pointee.mBitsPerChannel)bit")
                 }
             }
             input.append(sampleBuffer)
+            updateSilenceState(sampleBuffer)
 
         case .microphone:
             break // mic is handled by MicRecorder
@@ -278,12 +286,60 @@ extension SystemAudioRecorder: SCStreamOutput {
             }
 
             if !input.append(sampleBuffer) {
-                log("[SystemAudioRecorder] ❌ Video append failed — writer status: \(videoWriter?.status.rawValue ?? -1), error: \(videoWriter?.error?.localizedDescription ?? "unknown")")
+                let err = videoWriter?.error
+                log("[SystemAudioRecorder] ❌ Video append failed — writer status: \(videoWriter?.status.rawValue ?? -1), error: \(err?.localizedDescription ?? "unknown"), underlying: \((err as NSError?)?.userInfo ?? [:])")
                 videoFailed = true
             }
 
         @unknown default:
             break
+        }
+    }
+
+    /// Compute RMS of audio buffer and track silence duration.
+    private func updateSilenceState(_ sampleBuffer: CMSampleBuffer) {
+        guard let blockBuffer = CMSampleBufferGetDataBuffer(sampleBuffer) else { return }
+        let length = CMBlockBufferGetDataLength(blockBuffer)
+        var data = Data(count: length)
+        data.withUnsafeMutableBytes { rawBuf in
+            guard let ptr = rawBuf.baseAddress else { return }
+            CMBlockBufferCopyDataBytes(blockBuffer, atOffset: 0, dataLength: length, destination: ptr)
+        }
+
+        // Compute RMS from float32 samples
+        let floatCount = length / MemoryLayout<Float>.size
+        guard floatCount > 0 else { return }
+        let rms: Float = data.withUnsafeBytes { rawBuf in
+            guard let floats = rawBuf.baseAddress?.assumingMemoryBound(to: Float.self) else { return 0 }
+            var sum: Float = 0
+            for i in 0..<floatCount {
+                let s = floats[i]
+                sum += s * s
+            }
+            return sqrtf(sum / Float(floatCount))
+        }
+
+        let now = Date()
+        if rms < silenceRMSThreshold {
+            if silenceStart == nil {
+                silenceStart = now
+            }
+            if !isSilent, let start = silenceStart, now.timeIntervalSince(start) >= silenceDurationThreshold {
+                isSilent = true
+                log("[SystemAudioRecorder] Silence detected (>\(Int(silenceDurationThreshold))s)")
+                DispatchQueue.main.async { [weak self] in
+                    self?.onSilenceChanged?(true)
+                }
+            }
+        } else {
+            silenceStart = nil
+            if isSilent {
+                isSilent = false
+                log("[SystemAudioRecorder] Audio resumed")
+                DispatchQueue.main.async { [weak self] in
+                    self?.onSilenceChanged?(false)
+                }
+            }
         }
     }
 }
